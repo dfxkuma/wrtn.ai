@@ -4,16 +4,18 @@ import asyncio
 import contextlib
 import datetime
 import logging
-from typing import Any, ClassVar, Dict, Literal, Optional, Union, List
+from typing import Any, ClassVar, Dict, Literal, Optional, List
+
 from jwt import decode as token_decode
 from datetime import datetime
+import json
 
 _log = logging.getLogger(__name__)
 
 import aiohttp
-from utils import get_expired_from
+from .utils import get_expired_from
 
-from errors import (
+from .errors import (
     HTTPException,
     Forbidden,
     NotFound,
@@ -33,10 +35,13 @@ def content_type(response: Any) -> Any:
 
 class Route:
     API: ClassVar[str] = "https://api.wow.wrtn.ai"
+    CHAT: ClassVar[str] = "https://william.wow.wrtn.ai"
 
-    def __init__(self, method: str, path: str, api_type: Literal["API"]) -> None:
-        api_types = {"API": self.API}
-        self.base = api_types[api_type]
+    def __init__(
+        self, method: str, path: str, api_type: Literal["api", "API", "chat", "CHAT"]
+    ) -> None:
+        api_types = {"API": self.API, "CHAT": self.CHAT}
+        self.base = api_types[api_type.upper()]
         self.path: str = path
         self.method: str = method
 
@@ -45,7 +50,11 @@ class Route:
 
     @classmethod
     def api(cls, *args, **kwargs) -> "Route":
-        return cls(api_type="API", *args, **kwargs)
+        return cls(api_type="api", *args, **kwargs)
+
+    @classmethod
+    def chat(cls, *args, **kwargs) -> "Route":
+        return cls(api_type="chat", *args, **kwargs)
 
     @property
     def endpoint(self) -> str:
@@ -60,6 +69,7 @@ class HTTPClient:
         *,
         proxy: Optional[str] = None,
         proxy_auth: Optional[aiohttp.BasicAuth] = None,
+        api_user_agent: Optional[Dict[str, str]] = None,
     ) -> None:
         self.loop: asyncio.AbstractEventLoop = loop
         self.connector: aiohttp.BaseConnector = connector
@@ -67,10 +77,12 @@ class HTTPClient:
         self.__cookie_jar = aiohttp.CookieJar()
 
         self.token: Optional[str] = None
-        self.refresh_token: Optional[str] = None
+        self.refresh_user_token: Optional[str] = None
         self.refresh_time: Optional[datetime] = datetime.now()
         self.proxy: Optional[str] = proxy
         self.proxy_auth: Optional[aiohttp.BasicAuth] = proxy_auth
+
+        self.api_user_agent: Dict[str, str] = api_user_agent or {}
 
     def clear(self) -> None:
         if self.__session and self.__session.closed:
@@ -97,6 +109,38 @@ class HTTPClient:
         )
         return header
 
+    async def stream(
+        self,
+        route: Route,
+        **kwargs: Any,
+    ) -> Any:
+        method = route.method
+        url = route.url
+        headers: Dict[str, Any] = kwargs.get("headers", {})
+
+        headers = self.set_browser_header(headers)
+        headers["Accept"] = "*/*"
+        # text/event-stream type to read the contents
+
+        if self.token is not None and headers.get("Authorization") is None:
+            headers["Authorization"] = "Bearer " + self.token
+        elif self.token is None and headers.get("Authorization") is None:
+            headers["Authorization"] = "Bearer undefined"
+
+        if "json" in kwargs:
+            _content_type = "x-www-form-urlencoded" if method == "GET" else "json"
+            headers["Content-Type"] = f"application/{_content_type};charset=UTF-8"
+        if self.__cookie_jar:
+            kwargs["cookie_jar"] = self.__cookie_jar
+
+        kwargs["headers"] = headers
+
+        if self.proxy is not None:
+            kwargs["proxy"] = self.proxy
+        if self.proxy_auth is not None:
+            kwargs["proxy_auth"] = self.proxy_auth
+        return self.__session.request(method, url, **kwargs)
+
     async def request(
         self,
         route: Route,
@@ -107,9 +151,9 @@ class HTTPClient:
         headers: Dict[str, Any] = kwargs.get("headers", {})
 
         headers = self.set_browser_header(headers)
-        if self.token is not None:
+        if self.token is not None and headers.get("Authorization") is None:
             headers["Authorization"] = "Bearer " + self.token
-        else:
+        elif self.token is None and headers.get("Authorization") is None:
             headers["Authorization"] = "Bearer undefined"
 
         if "json" in kwargs:
@@ -153,18 +197,23 @@ class HTTPClient:
         if self.__session:
             await self.__session.close()
 
-    async def static_login(self, token: str, refresh_token: str) -> None:
+    async def static_login(self, refresh_token: str) -> None:
         if self.connector is None:
             self.connector = aiohttp.TCPConnector(limit=0)
         self.__session = aiohttp.ClientSession(
             connector=self.connector, cookie_jar=self.__cookie_jar
         )
 
-        self.token = token
-        self.refresh_token = refresh_token
-
+        self.refresh_user_token = refresh_token
+        await self.refresh_token()
         decode = token_decode(self.token, options={"verify_signature": False})
         self.refresh_time = datetime.fromtimestamp(decode["exp"])
+
+        user_data = await self.get_user()
+        self.api_user_agent["email"] = user_data["email"]
+        self.api_user_agent["user_id"] = user_data["_id"]
+        if user_data["meta"].get("platform") is not None:
+            self.api_user_agent["platform"] = user_data["meta"]["platform"]
 
     async def local_login(
         self,
@@ -187,8 +236,14 @@ class HTTPClient:
             json={"email": email, "password": password},
         )
         self.token = response["data"]["accessToken"]
-        self.refresh_token = response["data"]["refreshToken"]
+        self.refresh_user_token = response["data"]["refreshToken"]
         self.refresh_time = get_expired_from(self.token)
+
+        user_data = await self.get_user()
+        self.api_user_agent["email"] = user_data["email"]
+        self.api_user_agent["user_id"] = user_data["_id"]
+        if user_data["meta"].get("platform") is not None:
+            self.api_user_agent["platform"] = user_data["meta"]["platform"]
 
     async def email_exist(self, email: str) -> bool:
         response = await self.request(
@@ -275,11 +330,82 @@ class HTTPClient:
         )
         return response["data"]
 
-    async def get_chat_room(self) -> Any:
+    async def get_activate_rooms(self) -> Any:
         response = await self.request(Route.api("GET", "/chat"))
         return response["data"]
 
+    async def get_room(self, room_id: str) -> Any:
+        response = await self.request(Route.api("GET", f"/chat/{room_id}"))
+        return response["data"]
+
+    async def create_room(self) -> Any:
+        response = await self.request(Route.api("POST", "/chat"))
+        return response["data"]
+
     async def refresh_token(self) -> None:
-        response = await self.request(Route.api("POST", "/auth/refresh"))
+        response = await self.request(
+            Route.api("POST", "/auth/refresh"),
+            headers={"Authorization": "Bearer " + self.refresh_user_token},
+        )
         self.token = response["data"]["accessToken"]
         self.refresh_time = get_expired_from(response["data"]["accessToken"])
+
+    async def prompt_with_reader(
+        self,
+        room_id: str,
+        content: str,
+        model: Literal["GPT3.5", "GPT4", "GPT3.5_16K", "PALM"],
+        reroll: bool = False,
+        chip: bool = False,
+    ) -> Any:
+        json_data = {}
+        if chip:
+            json_data.update({"chip": True})
+        json_data["reroll"] = reroll
+        json_data["message"] = content
+
+        requester = await self.stream(
+            Route.chat("POST", f"/chat/{room_id}/stream"),
+            params={
+                "model": model,
+                "platform": self.api_user_agent["platform"],
+                "user": self.api_user_agent["email"],
+            },
+            json=json_data,
+        )
+        return requester
+
+    async def prompt(
+        self,
+        room_id: str,
+        content: str,
+        model: Literal["GPT3.5", "GPT4", "GPT3.5_16K", "PALM"],
+        reroll: bool = False,
+        chip: bool = False,
+    ) -> Dict[str, Any]:
+        json_data = {}
+        if chip:
+            json_data.update({"chip": True})
+        json_data["reroll"] = reroll
+        json_data["message"] = content
+
+        requester = await self.stream(
+            Route.chat("POST", f"/chat/{room_id}/stream"),
+            params={
+                "model": model,
+                "platform": self.api_user_agent["platform"],
+                "user": self.api_user_agent["email"],
+            },
+            json=json_data,
+        )
+        async with requester as response:
+            async for data in response.content:
+                raw = data.decode("utf-8")
+                raw = raw.replace('data: ', '')
+                clean_data = raw.replace('\n', '')
+                try:
+                    data = json.loads(clean_data)
+                    if data.get("message") is not None:
+                        return data["message"]
+                except json.decoder.JSONDecodeError:
+                    pass
