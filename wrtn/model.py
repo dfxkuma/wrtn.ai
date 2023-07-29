@@ -126,6 +126,38 @@ class User(BaseWrtnModel):
     def payment_due_date(self) -> Optional[datetime]:
         return datetime.strptime(self.data.get("dueDate"), "%Y-%m-%dT%H:%M:%S.%fZ")
 
+    @property
+    def parent_user_id(self) -> Optional[str]:
+        return self.data.get("parentUserId")
+
+    @property
+    def child_user_ids(self) -> Optional[List[str]]:
+        return self.data.get("childUserIdList")
+
+    @property
+    def metadata(self) -> Optional[Dict[str, Any]]:
+        return self.data.get("meta")
+
+    @property
+    def platform(self) -> Optional[str]:
+        return self.metadata.get("platform")
+
+    @property
+    def login_at(self) -> Optional[datetime]:
+        return datetime.strptime(self.data.get("loginAt"), "%Y-%m-%dT%H:%M:%S.%fZ")
+
+    @property
+    def version(self) -> str:
+        return self.data.get("version")
+
+    @property
+    def registered_at(self) -> datetime:
+        return datetime.strptime(self.data.get("createdAt"), "%Y-%m-%dT%H:%M:%S.%fZ")
+
+    @property
+    def updated_at(self) -> Optional[datetime]:
+        return datetime.strptime(self.data.get("updatedAt"), "%Y-%m-%dT%H:%M:%S.%fZ")
+
 
 class ChatRoom(BaseWrtnModel):
     def __init__(
