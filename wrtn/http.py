@@ -13,9 +13,10 @@ import json
 _log = logging.getLogger(__name__)
 
 import aiohttp
-from .utils import get_expired_from
+from utils import get_expired_from
+from model import User, ChatRoom
 
-from .errors import (
+from errors import (
     HTTPException,
     Forbidden,
     NotFound,
@@ -61,7 +62,7 @@ class Route:
         return self.base
 
 
-class HTTPClient:
+class Client:
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
@@ -324,23 +325,23 @@ class HTTPClient:
             },
         )
 
-    async def get_user(self) -> Any:
+    async def get_user(self) -> User:
         response = await self.request(
             Route.api("GET", "/user"),
         )
-        return response["data"]
+        return User(response["data"])
 
-    async def get_activate_rooms(self) -> Any:
+    async def get_activate_rooms(self) -> List[ChatRoom]:
         response = await self.request(Route.api("GET", "/chat"))
-        return response["data"]
+        return [ChatRoom(room_data) for room_data in response["data"]]
 
-    async def get_room(self, room_id: str) -> Any:
+    async def get_room(self, room_id: str) -> ChatRoom:
         response = await self.request(Route.api("GET", f"/chat/{room_id}"))
-        return response["data"]
+        return ChatRoom(response["data"])
 
-    async def create_room(self) -> Any:
+    async def create_room(self) -> ChatRoom:
         response = await self.request(Route.api("POST", "/chat"))
-        return response["data"]
+        return ChatRoom(response["data"])
 
     async def refresh_token(self) -> None:
         response = await self.request(
@@ -401,8 +402,8 @@ class HTTPClient:
         async with requester as response:
             async for data in response.content:
                 raw = data.decode("utf-8")
-                raw = raw.replace('data: ', '')
-                clean_data = raw.replace('\n', '')
+                raw = raw.replace("data: ", "")
+                clean_data = raw.replace("\n", "")
                 try:
                     data = json.loads(clean_data)
                     if data.get("message") is not None:
