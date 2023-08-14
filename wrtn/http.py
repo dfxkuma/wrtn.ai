@@ -339,6 +339,10 @@ class Client:
         response = await self.request(Route.api("GET", f"/chat/{room_id}"))
         return ChatRoom(response["data"])
 
+    async def delete_room(self, room_id: str) -> ChatRoom:
+        response = await self.request(Route.api("DELETE", f"/chat/{room_id}"))
+        return ChatRoom(response["data"])
+
     async def create_room(self) -> ChatRoom:
         response = await self.request(Route.api("POST", "/chat"))
         return ChatRoom(response["data"])
